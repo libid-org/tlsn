@@ -19,8 +19,6 @@ pub(crate) struct TlsCommitRequestMsg {
 pub(crate) struct ProveRequestMsg {
     pub(crate) request: ProveRequest,
     pub(crate) handshake: Option<(ServerName, HandshakeData)>,
-    /// What the prover reveals. Carries no length: the verifier measured
-    /// the session and sizes the transcript from its own record.
     pub(crate) transcript: Option<TranscriptReveal>,
 }
 

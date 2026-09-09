@@ -556,7 +556,7 @@ impl Prover<state::Committed> {
         });
 
         let reveal = config.reveal().map(|(sent, recv)| {
-            TranscriptReveal::from_partial(&transcript.to_partial(sent.clone(), recv.clone()))
+            TranscriptReveal::from(transcript.to_partial(sent.clone(), recv.clone()))
         });
 
         let msg = ProveRequestMsg {

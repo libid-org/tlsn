@@ -40,8 +40,6 @@ pub(crate) async fn verify<T: Vm<Binary> + Send + Sync>(
             ));
         };
 
-        // Checked before the transcript is built, so a request that does not
-        // match what was asked for costs nothing to refuse.
         if reveal.sent_authed() != auth_sent {
             return Err(Error::internal().with_msg("verification failed: sent auth data mismatch"));
         }
@@ -52,9 +50,7 @@ pub(crate) async fn verify<T: Vm<Binary> + Send + Sync>(
             );
         }
 
-        // Sized by what THIS party recorded. There is no length-mismatch case
-        // left to check: the prover no longer states a length, so it has no
-        // way to state a wrong one.
+        // Sized by the lengths this party recorded.
         reveal
             .into_partial(ciphertext_sent.len(), ciphertext_recv.len())
             .map_err(|e| {
