@@ -174,6 +174,22 @@ pub struct PartialTranscript {
     received_authed_idx: RangeSet<usize>,
 }
 
+/// The largest transcript length a peer may declare.
+///
+/// [`CompressedPartialTranscript`] carries each direction's total length as a
+/// bare integer, and the conversion to [`PartialTranscript`] allocates a buffer
+/// of that length. Nothing compares the number against the session it claims to
+/// describe until the verifier does, one message later, so a peer that declares
+/// an enormous total is allocated for first and refused second. An allocation
+/// that large fails, and a failed allocation aborts the process rather than
+/// returning an error a caller could handle.
+///
+/// This is a sanity bound on an untrusted number, not a protocol limit. What a
+/// session may actually carry is negotiated per session and is smaller by
+/// orders of magnitude: MPC-TLS authenticates every byte, so a transcript
+/// approaching this size is not something either party could afford to produce.
+const MAX_DECLARED_TRANSCRIPT_LEN: usize = 1 << 30;
+
 /// `PartialTranscript` in a compressed form.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(try_from = "validation::CompressedPartialTranscriptUnchecked")]
@@ -551,6 +567,18 @@ mod validation {
         type Error = InvalidCompressedPartialTranscript;
 
         fn try_from(unchecked: CompressedPartialTranscriptUnchecked) -> Result<Self, Self::Error> {
+            // Checked before anything else, because this is the field that is
+            // acted on before it is checked: the conversion below allocates
+            // `sent_total` and `recv_total` bytes, and only the verifier, a
+            // message later, knows what they should have been.
+            if unchecked.sent_total > MAX_DECLARED_TRANSCRIPT_LEN
+                || unchecked.recv_total > MAX_DECLARED_TRANSCRIPT_LEN
+            {
+                return Err(InvalidCompressedPartialTranscript(
+                    "declared transcript length is implausibly large",
+                ));
+            }
+
             if unchecked.sent_authed.len() != unchecked.sent_idx.len()
                 || unchecked.received_authed.len() != unchecked.recv_idx.len()
             {
@@ -619,6 +647,64 @@ mod validation {
             let transcript: Result<CompressedPartialTranscript, Box<bincode::ErrorKind>> =
                 bincode::deserialize(&bytes);
             assert!(transcript.is_err());
+        }
+
+        #[rstest]
+        // Expect to fail since the declared total is implausibly large.
+        //
+        // A peer controls both totals, and nothing else in the message has to
+        // grow with them: empty authenticated data and an empty index satisfy
+        // every other rule here, so the whole message stays a few dozen bytes.
+        // Without the bound this deserialized successfully and allocated
+        // `sent_total` zeroed bytes on the way, which for a total this size
+        // fails -- and a failed allocation aborts the process, so no caller
+        // ever sees an error to handle.
+        fn test_partial_transcript_implausible_total(
+            mut partial_transcript: CompressedPartialTranscriptUnchecked,
+        ) {
+            partial_transcript.sent_authed = Vec::new();
+            partial_transcript.sent_idx = RangeSet::default();
+            partial_transcript.sent_total = usize::MAX / 2;
+
+            let bytes = bincode::serialize(&partial_transcript).unwrap();
+            let transcript: Result<CompressedPartialTranscript, Box<bincode::ErrorKind>> =
+                bincode::deserialize(&bytes);
+            assert!(transcript.is_err());
+        }
+
+        #[rstest]
+        // The path a peer actually takes. `ProveRequestMsg` carries a
+        // `PartialTranscript`, not the compressed form, so the deserializer
+        // runs this validation and then converts -- and the conversion is what
+        // allocates. Before the bound, this test did not fail: it aborted the
+        // test process, because a failed allocation is not an error anyone can
+        // catch.
+        fn test_partial_transcript_implausible_total_is_never_allocated(
+            mut partial_transcript: CompressedPartialTranscriptUnchecked,
+        ) {
+            partial_transcript.sent_authed = Vec::new();
+            partial_transcript.sent_idx = RangeSet::default();
+            partial_transcript.sent_total = usize::MAX / 2;
+
+            let bytes = bincode::serialize(&partial_transcript).unwrap();
+            let transcript: Result<PartialTranscript, Box<bincode::ErrorKind>> =
+                bincode::deserialize(&bytes);
+            assert!(transcript.is_err());
+        }
+
+        #[rstest]
+        // The bound is a ceiling on the declared length, not on the data, so a
+        // transcript that is mostly unauthenticated is still accepted.
+        fn test_partial_transcript_sparse_but_plausible(
+            mut partial_transcript: CompressedPartialTranscriptUnchecked,
+        ) {
+            partial_transcript.sent_total = MAX_DECLARED_TRANSCRIPT_LEN;
+            partial_transcript.recv_total = MAX_DECLARED_TRANSCRIPT_LEN;
+
+            let bytes = bincode::serialize(&partial_transcript).unwrap();
+            let transcript: Result<CompressedPartialTranscript, Box<bincode::ErrorKind>> =
+                bincode::deserialize(&bytes);
+            assert!(transcript.is_ok());
         }
 
         #[rstest]
