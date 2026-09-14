@@ -58,8 +58,8 @@ impl ProverMpcDeps {
         // RCOT only flushes once all its clones reach the flush barrier, but the
         // preprocess branches (ke / record_layer / vm) don't all flush together, so a
         // shared instance deadlocks. All senders use the same global delta.
-        let id = |n: u128| Block::new(n.to_le_bytes());
-        let new_send = |instance_id: Block| {
+        let id = |n: u64| kos::InstanceId::new(n);
+        let new_send = |instance_id: kos::InstanceId| {
             SharedRCOTSender::new(kos::Sender::new(
                 kos::SenderConfig::default(),
                 delta.into_inner(),
@@ -67,7 +67,7 @@ impl ProverMpcDeps {
                 co::Receiver::default(),
             ))
         };
-        let new_recv = |rng: &mut rand::rngs::ThreadRng, instance_id: Block| {
+        let new_recv = |rng: &mut rand::rngs::ThreadRng, instance_id: kos::InstanceId| {
             let rcot_recv = kos::Receiver::new(
                 kos::ReceiverConfig::default(),
                 instance_id,
@@ -157,7 +157,7 @@ impl ProverProxyDeps {
                 let base_ot_send = co::Sender::default();
                 let rcot_recv = kos::Receiver::new(
                     kos::ReceiverConfig::default(),
-                    Block::ZERO,
+                    kos::InstanceId::SOLO,
                     base_ot_send,
                 );
                 let rcot_recv = ferret::Receiver::new(
