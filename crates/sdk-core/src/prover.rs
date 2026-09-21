@@ -33,7 +33,6 @@ use crate::{
 pub struct SdkProver {
     config: ProverConfig,
     state: State,
-    driver_task: Option<crate::spawn::DriverTask>,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -42,16 +41,24 @@ enum State {
     CommitAcceptedMpc {
         prover: Prover<state::CommitAccepted<Mpc>>,
         handle: SessionHandle,
+        driver: crate::spawn::DriverTask,
     },
     CommitAcceptedProxy {
         prover: Prover<state::CommitAccepted<Proxy>>,
         handle: SessionHandle,
+        driver: crate::spawn::DriverTask,
     },
     Committed {
         prover: Prover<state::Committed>,
         handle: SessionHandle,
+        driver: crate::spawn::DriverTask,
     },
-    Complete,
+    /// The protocol is over; the driver still holds the session IO.
+    Complete {
+        driver: crate::spawn::DriverTask,
+    },
+    /// The protocol is over and the IO was handed back.
+    Finished,
     Error,
 }
 
@@ -62,7 +69,8 @@ impl std::fmt::Debug for State {
             State::CommitAcceptedMpc { .. } => write!(f, "CommitAcceptedMpc"),
             State::CommitAcceptedProxy { .. } => write!(f, "CommitAcceptedProxy"),
             State::Committed { .. } => write!(f, "Committed"),
-            State::Complete => write!(f, "Complete"),
+            State::Complete { .. } => write!(f, "Complete"),
+            State::Finished => write!(f, "Finished"),
             State::Error => write!(f, "Error"),
         }
     }
@@ -92,7 +100,6 @@ impl SdkProver {
         Ok(SdkProver {
             config,
             state: State::Initialized,
-            driver_task: None,
         })
     }
 
@@ -115,7 +122,7 @@ impl SdkProver {
 
         let session = Session::new(Box::new(verifier_io) as crate::spawn::BoxIo);
         let (driver, mut handle) = session.split();
-        self.driver_task = Some(crate::spawn::DriverTask::spawn(driver));
+        let mut driver = crate::spawn::DriverTask::spawn(driver);
 
         let prover_config = tlsn::config::prover::ProverConfig::builder().build()?;
         let prover = handle.new_prover(prover_config)?;
@@ -128,12 +135,20 @@ impl SdkProver {
                 )
                 .build()?;
 
-            let prover = prover
-                .commit(commit_config)
-                .await
-                .map_err(|e| SdkError::protocol(e.to_string()))?;
+            let prover = driver
+                .during(async {
+                    prover
+                        .commit(commit_config)
+                        .await
+                        .map_err(|e| SdkError::protocol(e.to_string()))
+                })
+                .await?;
 
-            self.state = State::CommitAcceptedProxy { prover, handle };
+            self.state = State::CommitAcceptedProxy {
+                prover,
+                handle,
+                driver,
+            };
         } else {
             let commit_config = {
                 let mut builder = MpcTlsConfig::builder()
@@ -159,12 +174,20 @@ impl SdkProver {
                 builder.network(self.config.network.into()).build()?
             };
 
-            let prover = prover
-                .commit(commit_config)
-                .await
-                .map_err(|e| SdkError::protocol(e.to_string()))?;
+            let prover = driver
+                .during(async {
+                    prover
+                        .commit(commit_config)
+                        .await
+                        .map_err(|e| SdkError::protocol(e.to_string()))
+                })
+                .await?;
 
-            self.state = State::CommitAcceptedMpc { prover, handle };
+            self.state = State::CommitAcceptedMpc {
+                prover,
+                handle,
+                driver,
+            };
         }
 
         info!("setup complete");
@@ -190,7 +213,12 @@ impl SdkProver {
         server_io: impl Io,
         request: HttpRequest,
     ) -> Result<HttpResponse> {
-        let State::CommitAcceptedMpc { prover, handle } = self.state.take() else {
+        let State::CommitAcceptedMpc {
+            prover,
+            handle,
+            mut driver,
+        } = self.state.take()
+        else {
             return Err(SdkError::invalid_state(
                 "prover is not in commit accepted MPC state",
             ));
@@ -206,24 +234,29 @@ impl SdkProver {
 
         info!("sending request");
 
-        let (response, prover) = match futures::try_join!(
-            async {
-                let result = send_request(tls_conn, request).await;
-                info!(
-                    "send_request completed with result: {:?}",
-                    result.as_ref().map(|_| "Ok").map_err(|e| e.to_string())
-                );
-                result
-            },
-            async {
-                let result = prover.await;
-                info!(
-                    "prover completed with result: {:?}",
-                    result.as_ref().map(|_| "Ok").map_err(|e| e.to_string())
-                );
-                result.map_err(|e| SdkError::protocol(e.to_string()))
-            }
-        ) {
+        let (response, prover) = match driver
+            .during(async {
+                futures::try_join!(
+                    async {
+                        let result = send_request(tls_conn, request).await;
+                        info!(
+                            "send_request completed with result: {:?}",
+                            result.as_ref().map(|_| "Ok").map_err(|e| e.to_string())
+                        );
+                        result
+                    },
+                    async {
+                        let result = prover.await;
+                        info!(
+                            "prover completed with result: {:?}",
+                            result.as_ref().map(|_| "Ok").map_err(|e| e.to_string())
+                        );
+                        result.map_err(|e| SdkError::protocol(e.to_string()))
+                    }
+                )
+            })
+            .await
+        {
             Ok(result) => {
                 info!("try_join succeeded");
                 result
@@ -236,7 +269,11 @@ impl SdkProver {
 
         info!("response received, prover transitioning to Committed state");
 
-        self.state = State::Committed { prover, handle };
+        self.state = State::Committed {
+            prover,
+            handle,
+            driver,
+        };
         self.log_transcript_usage();
 
         Ok(response)
@@ -251,7 +288,12 @@ impl SdkProver {
     ///
     /// * `request` - The HTTP request to send.
     pub async fn send_request_proxy(&mut self, request: HttpRequest) -> Result<HttpResponse> {
-        let State::CommitAcceptedProxy { prover, handle } = self.state.take() else {
+        let State::CommitAcceptedProxy {
+            prover,
+            handle,
+            mut driver,
+        } = self.state.take()
+        else {
             return Err(SdkError::invalid_state(
                 "prover is not in commit accepted proxy state",
             ));
@@ -267,24 +309,29 @@ impl SdkProver {
 
         info!("sending request");
 
-        let (response, prover) = match futures::try_join!(
-            async {
-                let result = send_request(tls_conn, request).await;
-                info!(
-                    "send_request completed with result: {:?}",
-                    result.as_ref().map(|_| "Ok").map_err(|e| e.to_string())
-                );
-                result
-            },
-            async {
-                let result = prover.await;
-                info!(
-                    "prover completed with result: {:?}",
-                    result.as_ref().map(|_| "Ok").map_err(|e| e.to_string())
-                );
-                result.map_err(|e| SdkError::protocol(e.to_string()))
-            }
-        ) {
+        let (response, prover) = match driver
+            .during(async {
+                futures::try_join!(
+                    async {
+                        let result = send_request(tls_conn, request).await;
+                        info!(
+                            "send_request completed with result: {:?}",
+                            result.as_ref().map(|_| "Ok").map_err(|e| e.to_string())
+                        );
+                        result
+                    },
+                    async {
+                        let result = prover.await;
+                        info!(
+                            "prover completed with result: {:?}",
+                            result.as_ref().map(|_| "Ok").map_err(|e| e.to_string())
+                        );
+                        result.map_err(|e| SdkError::protocol(e.to_string()))
+                    }
+                )
+            })
+            .await
+        {
             Ok(result) => {
                 info!("try_join succeeded");
                 result
@@ -297,7 +344,11 @@ impl SdkProver {
 
         info!("response received, prover transitioning to Committed state");
 
-        self.state = State::Committed { prover, handle };
+        self.state = State::Committed {
+            prover,
+            handle,
+            driver,
+        };
         self.log_transcript_usage();
 
         Ok(response)
@@ -371,7 +422,12 @@ impl SdkProver {
     /// sent ranges first, then recv). When `commit` is `None`, the
     /// `commitments` vector is empty.
     pub async fn reveal(&mut self, reveal: Reveal, commit: Option<Commit>) -> Result<RevealOutput> {
-        let State::Committed { mut prover, handle } = self.state.take() else {
+        let State::Committed {
+            mut prover,
+            handle,
+            driver,
+        } = self.state.take()
+        else {
             return Err(SdkError::invalid_state("prover is not in committed state"));
         };
 
@@ -431,14 +487,14 @@ impl SdkProver {
 
         info!("finalized");
 
-        self.state = State::Complete;
+        self.state = State::Complete { driver };
 
         build_reveal_output(prover_output)
     }
 
     /// Returns true if the prover has completed the protocol.
     pub fn is_complete(&self) -> bool {
-        matches!(self.state, State::Complete)
+        matches!(self.state, State::Complete { .. } | State::Finished)
     }
 
     /// Waits for the session driver to stop and returns the underlying IO.
@@ -447,15 +503,11 @@ impl SdkProver {
     /// is no longer read from or written to by TLSNotary and can be reused by
     /// the application.
     pub async fn finish(&mut self) -> Result<Box<dyn Io>> {
-        if !self.is_complete() {
+        let State::Complete { driver } = self.state.take() else {
             return Err(SdkError::invalid_state("prover is not complete"));
-        }
-
-        self.driver_task
-            .take()
-            .ok_or_else(|| SdkError::invalid_state("prover session already finished"))?
-            .finish()
-            .await
+        };
+        self.state = State::Finished;
+        driver.finish().await
     }
 }
 
