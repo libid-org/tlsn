@@ -128,10 +128,17 @@ impl SdkProver {
                 )
                 .build()?;
 
-            let prover = prover
-                .commit(commit_config)
-                .await
-                .map_err(|e| SdkError::protocol(e.to_string()))?;
+            let prover = self
+                .driver_task
+                .as_mut()
+                .expect("driver started")
+                .during(async {
+                    prover
+                        .commit(commit_config)
+                        .await
+                        .map_err(|e| SdkError::protocol(e.to_string()))
+                })
+                .await?;
 
             self.state = State::CommitAcceptedProxy { prover, handle };
         } else {
@@ -159,10 +166,17 @@ impl SdkProver {
                 builder.network(self.config.network.into()).build()?
             };
 
-            let prover = prover
-                .commit(commit_config)
-                .await
-                .map_err(|e| SdkError::protocol(e.to_string()))?;
+            let prover = self
+                .driver_task
+                .as_mut()
+                .expect("driver started")
+                .during(async {
+                    prover
+                        .commit(commit_config)
+                        .await
+                        .map_err(|e| SdkError::protocol(e.to_string()))
+                })
+                .await?;
 
             self.state = State::CommitAcceptedMpc { prover, handle };
         }
@@ -206,24 +220,32 @@ impl SdkProver {
 
         info!("sending request");
 
-        let (response, prover) = match futures::try_join!(
-            async {
-                let result = send_request(tls_conn, request).await;
-                info!(
-                    "send_request completed with result: {:?}",
-                    result.as_ref().map(|_| "Ok").map_err(|e| e.to_string())
-                );
-                result
-            },
-            async {
-                let result = prover.await;
-                info!(
-                    "prover completed with result: {:?}",
-                    result.as_ref().map(|_| "Ok").map_err(|e| e.to_string())
-                );
-                result.map_err(|e| SdkError::protocol(e.to_string()))
-            }
-        ) {
+        let (response, prover) = match self
+            .driver_task
+            .as_mut()
+            .expect("driver started")
+            .during(async {
+                futures::try_join!(
+                    async {
+                        let result = send_request(tls_conn, request).await;
+                        info!(
+                            "send_request completed with result: {:?}",
+                            result.as_ref().map(|_| "Ok").map_err(|e| e.to_string())
+                        );
+                        result
+                    },
+                    async {
+                        let result = prover.await;
+                        info!(
+                            "prover completed with result: {:?}",
+                            result.as_ref().map(|_| "Ok").map_err(|e| e.to_string())
+                        );
+                        result.map_err(|e| SdkError::protocol(e.to_string()))
+                    }
+                )
+            })
+            .await
+        {
             Ok(result) => {
                 info!("try_join succeeded");
                 result
@@ -267,24 +289,32 @@ impl SdkProver {
 
         info!("sending request");
 
-        let (response, prover) = match futures::try_join!(
-            async {
-                let result = send_request(tls_conn, request).await;
-                info!(
-                    "send_request completed with result: {:?}",
-                    result.as_ref().map(|_| "Ok").map_err(|e| e.to_string())
-                );
-                result
-            },
-            async {
-                let result = prover.await;
-                info!(
-                    "prover completed with result: {:?}",
-                    result.as_ref().map(|_| "Ok").map_err(|e| e.to_string())
-                );
-                result.map_err(|e| SdkError::protocol(e.to_string()))
-            }
-        ) {
+        let (response, prover) = match self
+            .driver_task
+            .as_mut()
+            .expect("driver started")
+            .during(async {
+                futures::try_join!(
+                    async {
+                        let result = send_request(tls_conn, request).await;
+                        info!(
+                            "send_request completed with result: {:?}",
+                            result.as_ref().map(|_| "Ok").map_err(|e| e.to_string())
+                        );
+                        result
+                    },
+                    async {
+                        let result = prover.await;
+                        info!(
+                            "prover completed with result: {:?}",
+                            result.as_ref().map(|_| "Ok").map_err(|e| e.to_string())
+                        );
+                        result.map_err(|e| SdkError::protocol(e.to_string()))
+                    }
+                )
+            })
+            .await
+        {
             Ok(result) => {
                 info!("try_join succeeded");
                 result
