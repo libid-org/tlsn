@@ -1,8 +1,11 @@
 //! Platform-aware task spawning.
 
-use std::future::Future;
+use std::{future::Future, pin::pin};
 
-use futures::{FutureExt, channel::oneshot};
+use futures::{
+    channel::oneshot,
+    future::{self, Either},
+};
 use tlsn::SessionDriver;
 
 use crate::{
@@ -28,22 +31,24 @@ impl DriverTask {
         Self(receiver)
     }
 
-    /// A dead session cannot finish an outstanding setup or HTTP operation.
+    /// Run `operation`, unless the session ends first.
     pub(crate) async fn during<T>(
         &mut self,
         operation: impl Future<Output = Result<T>>,
     ) -> Result<T> {
-        let operation = operation.fuse();
-        futures::pin_mut!(operation);
-        futures::select_biased! {
-            result = operation => result,
-            result = (&mut self.0).fuse() => {
-                let result = result.map_err(|_| SdkError::internal("session driver task dropped"))?;
-                Err(match result {
-                    Ok(_) => SdkError::protocol("session closed before operation completed"),
-                    Err(error) => SdkError::protocol(format!("session driver: {error}")),
-                })
-            }
+        match future::select(pin!(operation), pin!(self.ended())).await {
+            Either::Left((result, _)) => result,
+            Either::Right((error, _)) => Err(error),
+        }
+    }
+
+    /// Resolves when the driver ends, with the error an operation still in
+    /// flight at that moment gets.
+    async fn ended(&mut self) -> SdkError {
+        match (&mut self.0).await {
+            Ok(Ok(_)) => SdkError::protocol("session closed before the operation completed"),
+            Ok(Err(error)) => SdkError::protocol(format!("session driver: {error}")),
+            Err(_canceled) => SdkError::internal("session driver task dropped"),
         }
     }
 
