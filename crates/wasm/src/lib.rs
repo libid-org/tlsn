@@ -5,6 +5,7 @@
 #![allow(non_snake_case)]
 
 pub mod handler;
+mod heartbeat;
 pub(crate) mod io;
 mod log;
 pub mod prover;

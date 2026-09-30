@@ -10,6 +10,7 @@ use tlsn_sdk_core::{
 use wasm_bindgen::{JsError, prelude::*};
 
 use crate::{
+    heartbeat::Heartbeat,
     io::{JsIo, JsIoAdapter},
     types::*,
 };
@@ -60,6 +61,7 @@ impl JsProver {
     /// * `verifier_io` - A JavaScript object implementing the IoChannel
     ///   interface, connected to the verifier.
     pub async fn setup(&mut self, verifier_io: JsIo) -> Result<()> {
+        let _heartbeat = Heartbeat::start();
         self.emit_progress("MPC_SETUP", 0.1, "Connecting to verifier...");
 
         let adapter = JsIoAdapter::new(verifier_io);
@@ -86,6 +88,7 @@ impl JsProver {
         server_io: Option<JsIo>,
         request: HttpRequest,
     ) -> Result<HttpResponse> {
+        let _heartbeat = Heartbeat::start();
         self.emit_progress(
             "CONNECTING_TO_SERVER",
             0.3,
@@ -136,6 +139,7 @@ impl JsProver {
     /// }`), in the same order as the input `Commit`. The `commitments`
     /// array is empty when no commit was supplied.
     pub async fn reveal(&mut self, reveal: Reveal, commit: Option<Commit>) -> Result<RevealOutput> {
+        let _heartbeat = Heartbeat::start();
         self.emit_progress("REVEAL", 0.7, "Proving and revealing data...");
 
         let core_reveal = convert_reveal(reveal);
@@ -157,6 +161,7 @@ impl JsProver {
     /// After this resolves, JavaScript may safely reuse the original
     /// `IoChannel` for an application-level protocol.
     pub async fn finish(&mut self) -> Result<()> {
+        let _heartbeat = Heartbeat::start();
         self.inner
             .finish()
             .await

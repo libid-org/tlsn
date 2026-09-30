@@ -8,6 +8,7 @@ use tlsn_sdk_core::{SdkVerifier, VerifierConfig as CoreVerifierConfig};
 use wasm_bindgen::prelude::*;
 
 use crate::{
+    heartbeat::Heartbeat,
     io::{JsIo, JsIoAdapter},
     types::VerifierOutput,
 };
@@ -41,6 +42,7 @@ impl JsVerifier {
     /// * `prover_io` - A JavaScript object implementing the IoChannel
     ///   interface, connected to the prover.
     pub async fn connect(&mut self, prover_io: JsIo) -> Result<()> {
+        let _heartbeat = Heartbeat::start();
         let adapter = JsIoAdapter::new(prover_io);
         self.inner
             .connect(adapter)
@@ -54,6 +56,7 @@ impl JsVerifier {
     /// mode. When a server name is returned, call `set_server_socket()`
     /// with a connection to that server before calling `run()`.
     pub async fn setup(&mut self) -> Result<Option<String>> {
+        let _heartbeat = Heartbeat::start();
         self.inner
             .setup()
             .await
@@ -79,6 +82,7 @@ impl JsVerifier {
     ///
     /// In proxy mode, `set_server_socket()` must be called first.
     pub async fn run(&mut self) -> Result<()> {
+        let _heartbeat = Heartbeat::start();
         self.inner
             .run()
             .await
@@ -87,6 +91,7 @@ impl JsVerifier {
 
     /// Verifies the connection and finalizes the protocol.
     pub async fn verify(&mut self) -> Result<VerifierOutput> {
+        let _heartbeat = Heartbeat::start();
         let core_output = self
             .inner
             .verify()
@@ -100,6 +105,7 @@ impl JsVerifier {
     /// After this resolves, JavaScript may safely reuse the original
     /// `IoChannel` for an application-level protocol.
     pub async fn finish(&mut self) -> Result<()> {
+        let _heartbeat = Heartbeat::start();
         self.inner
             .finish()
             .await
